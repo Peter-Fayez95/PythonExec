@@ -1,56 +1,26 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os/exec"
-	// "bufio"
-	// "sync"
+	"time"
 )
 
 type Request struct {
-	ID   *string `json:"id"`
-	Code *string `json:"code"`
+	Code    *string `json:"code"`
 }
 
 type Response struct {
-	Stdout string `json:"stdout"`
-	Stderr string `json:"stderr"`
-	Error  string `json:"error,omitempty"`
-}
-
-var (
-	// Create Python subprocess
-	cmd = exec.Command("python3", "-q", "-u", "-i")
-
-	// Get stdin pipe
-	stdin, errStdin = cmd.StdinPipe()
-
-	// Get stdout pipe
-	stdout, errStdout = cmd.StdoutPipe()
-
-	// Get stderr pipe
-	stderr, errStderr = cmd.StderrPipe()
-)
-
-func ReadfromReader(r io.Reader) string {
-	buffer := io.LimitReader(r, 1)
-	log.Println("Reading from buffer")
-	buf := make([]byte, 80)
-	n, err := buffer.Read(buf)
-	if err != nil {
-		log.Fatal(err)
-	}
-	return string(buf[:n])
+	Stdout  string `json:"stdout"`
+	Stderr  string `json:"stderr"`
 }
 
 func execHandler(w http.ResponseWriter, r *http.Request) {
-	// Start the command
-	cmd.Start()
-
 	// Only accept POST requests
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error": "Method not allowed"}`, http.StatusMethodNotAllowed)
@@ -72,55 +42,76 @@ func execHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Received request: %s", *req.Code)
+	// Set default timeout if not specified
+	timeout := 2 // Default 2 seconds
 
-	if errStdout != nil {
-		// Return error and omit stdout/stderr
+	// Create a context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	defer cancel()
+
+	// Create Python subprocess with the context
+	cmd := exec.CommandContext(ctx, "python3", "-c", *req.Code)
+	
+	// Get stdout pipe
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
 		http.Error(w, `{"error": "Failed to create stdout pipe"}`, http.StatusInternalServerError)
 		return
 	}
-
-	if errStderr != nil {
-		// Return error and omit stdout/stderr
+	
+	// Get stderr pipe
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
 		http.Error(w, `{"error": "Failed to create stderr pipe"}`, http.StatusInternalServerError)
 		return
 	}
 	
-	_, err := io.WriteString(stdin, *req.Code + "\n")
-	if err != nil {
-		// Return error and omit stdout/stderr
-		http.Error(w, `{"error": "Failed to write to stdin"}`, http.StatusInternalServerError)
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		http.Error(w, `{"error": "Failed to start Python process"}`, http.StatusInternalServerError)
 		return
 	}
-	log.Println("Wrote to stdin")
-
-	// cmd.Wait()
-	// log.Println(*stdout)
-
-	// var wg sync.WaitGroup
-
-	// wg.Add(2)
-	var stdoutBytes, stderrBytes string
-	// go func() {
-		// log.Println("Reading from stdout")
-		// defer wg.Done()
-		stdoutBytes = ReadfromReader(stdout)
-	// }()
-
-	// go func() {
-	// 	log.Println("Reading from stderr")
-	// 	defer wg.Done()
-		stderrBytes = ReadfromReader(stderr)
-	// }()
 	
-	// wg.Wait()
-	// log.Println("Read from stdout and stderr")
-	
-	response := Response{
-		Stdout: string(stdoutBytes),
-		Stderr: string(stderrBytes),
+	// Read stdout
+	stdoutBytes, err := io.ReadAll(stdout)
+	if err != nil {
+		http.Error(w, `{"error": "Failed to read stdout"}`, http.StatusInternalServerError)
+		return
 	}
-	_ = json.NewEncoder(w).Encode(response)
+	
+	// Read stderr
+	stderrBytes, err := io.ReadAll(stderr)
+	if err != nil {
+		http.Error(w, `{"error": "Failed to read stderr"}`, http.StatusInternalServerError)
+		return
+	}
+	
+	// Wait for the command to finish
+	err = cmd.Wait()
+	
+	// Create response
+	response := Response{
+		Stdout:  string(stdoutBytes),
+		Stderr:  string(stderrBytes),
+	}
+	
+	// Check if the execution timed out
+	if ctx.Err() == context.DeadlineExceeded {
+		// response.Timeout = true
+		// response.Stderr += "\nExecution timed out after " + fmt.Sprintf("%d", timeout) + " seconds"
+		http.Error(w, `{"error": "Execution timed out"}`, http.StatusInternalServerError)
+		return
+	} else if err != nil {
+		// We don't return an HTTP error here because we want to return the stderr output
+		// even if the Python code had an error
+		log.Printf("Python execution error: %v", err)
+	}
+	
+	// Write the JSON response
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 }
 
 func main() {
@@ -129,13 +120,6 @@ func main() {
 	// Define the port where the server will listen
 	port := ":8080"
 	fmt.Println("Server is listening on port", port)
-
-	
-	// if err := cmd.Start(); err != nil {
-	// 	// Return error and omit stdout/stderr
-	// 	http.Error(w, `{"error": "Failed to start Python process"}`, http.StatusInternalServerError)
-	// 	return
-	// }
 
 	// Start the server and listen for requests
 	if err := http.ListenAndServe(port, nil); err != nil {
