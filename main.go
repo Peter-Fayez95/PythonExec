@@ -10,18 +10,20 @@ import (
 )
 
 type Request struct {
-	Code string `json:"code"`
+	ID   *string `json:"id"`
+	Code *string `json:"code"`
 }
 
 type Response struct {
 	Stdout string `json:"stdout"`
 	Stderr string `json:"stderr"`
+	Error  string `json:"error,omitempty"`
 }
 
 func execHandler(w http.ResponseWriter, r *http.Request) {
 	// Only accept POST requests
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, `{"error": "Method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -31,65 +33,70 @@ func execHandler(w http.ResponseWriter, r *http.Request) {
 	// Decode the request body
 	var req Request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		http.Error(w, `{"error": "Invalid request body"}`, http.StatusBadRequest)
+		return
+	}
+
+	if req.Code == nil {
+		http.Error(w, `{"error": "Missing required field: 'code'"}`, http.StatusBadRequest)
 		return
 	}
 
 	// Create Python subprocess
-	cmd := exec.Command("python3", "-c", req.Code)
-	
+	cmd := exec.Command("python3", "-c", *req.Code)
+
 	// Get stdout pipe
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		http.Error(w, "Failed to create stdout pipe", http.StatusInternalServerError)
+		// Return error and omit stdout/stderr
+		http.Error(w, `{"error": "Failed to create stdout pipe"}`, http.StatusInternalServerError)
 		return
 	}
-	
+
 	// Get stderr pipe
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		http.Error(w, "Failed to create stderr pipe", http.StatusInternalServerError)
+		// Return error and omit stdout/stderr
+		http.Error(w, `{"error": "Failed to create stderr pipe"}`, http.StatusInternalServerError)
 		return
 	}
-	
+
 	// Start the command
 	if err := cmd.Start(); err != nil {
-		http.Error(w, "Failed to start Python process", http.StatusInternalServerError)
+		// Return error and omit stdout/stderr
+		http.Error(w, `{"error": "Failed to start Python process"}`, http.StatusInternalServerError)
 		return
 	}
-	
+
 	// Read stdout
 	stdoutBytes, err := io.ReadAll(stdout)
 	if err != nil {
-		http.Error(w, "Failed to read stdout", http.StatusInternalServerError)
+		// Return error and omit stdout/stderr
+		http.Error(w, `{"error": "Failed to read stdout"}`, http.StatusInternalServerError)
 		return
 	}
-	
+
 	// Read stderr
 	stderrBytes, err := io.ReadAll(stderr)
 	if err != nil {
-		http.Error(w, "Failed to read stderr", http.StatusInternalServerError)
+		// Return error and omit stdout/stderr
+		http.Error(w, `{"error": "Failed to read stderr"}`, http.StatusInternalServerError)
 		return
 	}
-	
+
 	// Wait for the command to finish
 	if err := cmd.Wait(); err != nil {
-		// We don't return an error here because we want to return the stderr output
-		// even if the Python code had an error
+		// Log the Python execution error but do not return it in the response
 		log.Printf("Python execution error: %v", err)
 	}
-	
-	// Create response
+
+	// log.Printf("stdout: %s", string(stdoutBytes))
+	// log.Printf("stderr: %s", string(stderrBytes))
 	response := Response{
 		Stdout: string(stdoutBytes),
 		Stderr: string(stderrBytes),
 	}
-	
-	// Write the JSON response
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func main() {
