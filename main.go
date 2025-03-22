@@ -11,6 +11,7 @@ import (
 	"log"
 	"strings"
     "github.com/google/uuid"
+    // "time"
 )
 
 var sessions = make(map[string]*PythonSession)
@@ -44,11 +45,10 @@ func NewPythonSession() (*PythonSession, error) {
     if err != nil {
         return nil, err
     }
-
     stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, err
-	}
+    if err != nil {
+        return nil, err
+    }
 
     if err := cmd.Start(); err != nil {
         return nil, err
@@ -62,42 +62,43 @@ func NewPythonSession() (*PythonSession, error) {
         mutex:  &sync.Mutex{},
     }
 
-    // Consume initial startup messages
-    // Write the marker command
-    _, err = fmt.Fprintf(ps.stdin, "import sys; sys.stdout.write('__PROMPT__\\n'); sys.stdout.flush()\n")
+    // Step 1: Handle stdout - Write marker and consume output until __PROMPT__
+    _, err = fmt.Fprintf(ps.stdin, "import sys; res = sys.stdout.write('__PROMPT__\\n'); sys.stdout.flush()\n")
     if err != nil {
         return nil, err
     }
-
-    _, err = fmt.Fprintf(ps.stdin, "import sys; sys.stderr.write('__PROMPT__\\n'); sys.stderr.flush()\n")
-    if err != nil {
-        return nil, err
-    }
-
 
     scannerStdout := bufio.NewScanner(ps.stdout)
-    // scannerStderr := bufio.NewScanner(ps.stderr)
     for scannerStdout.Scan() {
-        if scannerStdout.Text() == "__PROMPT__" {
-            break
-        }
+        if strings.Contains(scannerStdout.Text(), "__PROMPT__") {
+			break
+		}
     }
-
-    // for scannerStderr.Scan() {
-    //     if scannerStderr.Text() == "__PROMPT__" {
-    //         break
-    //     }
-    // }
-
 
     if err := scannerStdout.Err(); err != nil {
         return nil, err
     }
 
-    // if err := scannerStderr.Err(); err != nil {
-    //     return nil, err
-    // }
+    // Step 2: Handle stderr - Write marker and consume output until __PROMPT__
+    _, err = fmt.Fprintf(ps.stdin, "import sys; res = sys.stderr.write('__PROMPT__\\n'); sys.stderr.flush()\n")
+    if err != nil {
+        return nil, err
+    }
 
+    scannerStderr := bufio.NewScanner(ps.stderr)
+    for scannerStderr.Scan() {
+        if strings.Contains(scannerStderr.Text(), "__PROMPT__") {
+			break
+		}
+        // if scannerStderr.Text() == "__PROMPT__" {
+        //     break
+        // }
+    }
+    if err := scannerStderr.Err(); err != nil {
+        return nil, err
+    }
+
+    // log.Println("Python session started")
 
     return ps, nil
 }
@@ -106,59 +107,57 @@ func (ps *PythonSession) Execute(code string) (string, string, error) {
     ps.mutex.Lock()
     defer ps.mutex.Unlock()
 
-
     // Write the code followed by a newline
     _, err := fmt.Fprintf(ps.stdin, "%s\n", code)
     if err != nil {
         return "", "", err
     }
 
-    // Write the marker command
-    _, err = fmt.Fprintf(ps.stdin, "import sys; sys.stdout.write('__PROMPT__\\n'); sys.stdout.flush()\n")
+    // Write the stdout marker command
+    _, err = fmt.Fprintf(ps.stdin, "import sys; res = sys.stdout.write('__PROMPT__\\n'); sys.stdout.flush()\n")
     if err != nil {
         return "", "", err
     }
-    // _, err = fmt.Fprintf(ps.stdin, "import sys; sys.stderr.write('__PROMPT__\\n'); sys.stderr.flush()\n")
-    // if err != nil {
-    //     return "", "", err
-    // }
 
-    log.Printf("Executing code: %s", code)
+    // Write the stderr marker command
+    _, err = fmt.Fprintf(ps.stdin, "res = sys.stderr.write('__PROMPT__\\n'); sys.stderr.flush()\n")
+    if err != nil {
+        return "", "", err
+    }
 
-    // Read output until the marker
+    // Read stdout until the marker
     scannerStdout := bufio.NewScanner(ps.stdout)
-    // scannerStderr := bufio.NewScanner(ps.stderr)
+    scannerStderr := bufio.NewScanner(ps.stderr)
 
-    var stdoutLines []string 
-    // var stderrLines []string
-    
+    var stdoutLines []string
+    var stderrLines []string
+
     for scannerStdout.Scan() {
         line := scannerStdout.Text()
-        if line == "__PROMPT__" {
-            break
-        }
+        if strings.Contains(line, "__PROMPT__") {
+			break
+		}
+        // log.Printf("stdout: %s", line)
         stdoutLines = append(stdoutLines, line)
     }
-    log.Printf("stdoutLines: %s", stdoutLines)
 
-    // for scannerStderr.Scan() {
-    //     line := scannerStderr.Text()
-    //     if line == "__PROMPT__" {
-    //         break
-    //     }
-    //     stderrLines = append(stderrLines, line)
-    // }
+    for scannerStderr.Scan() {
+        line := scannerStderr.Text()
+        if strings.Contains(line, "__PROMPT__") {
+			break
+		}
+        stderrLines = append(stderrLines, line)
+    }
 
     if err := scannerStdout.Err(); err != nil {
         return "", "", err
     }
-
-    // if err := scannerStderr.Err(); err != nil {
-    //     return "", "", err
-    // }
+    if err := scannerStderr.Err(); err != nil {
+        return "", "", err
+    }
 
     // Combine output lines
-    return strings.Join(stdoutLines, "\n"), "", nil
+    return strings.Join(stdoutLines, "\n"), strings.Join(stderrLines, "\n"), nil
 }
 
 func execHandler(w http.ResponseWriter, r *http.Request) {
