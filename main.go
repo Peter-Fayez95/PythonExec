@@ -62,15 +62,15 @@ func NewPythonSession() (*PythonSession, error) {
         mutex:  &sync.Mutex{},
     }
 
-    // Step 1: Handle stdout - Write marker and consume output until __PROMPT__
-    _, err = fmt.Fprintf(ps.stdin, "import sys; res = sys.stdout.write('__PROMPT__\\n'); sys.stdout.flush()\n")
+    // Step 1: Handle stdout - Write marker and consume output until __END_OF_EXECUTION__
+    _, err = fmt.Fprintf(ps.stdin, "import sys; res = sys.stdout.write('__END_OF_EXECUTION__\\n'); sys.stdout.flush()\n")
     if err != nil {
         return nil, err
     }
 
     scannerStdout := bufio.NewScanner(ps.stdout)
     for scannerStdout.Scan() {
-        if strings.Contains(scannerStdout.Text(), "__PROMPT__") {
+        if strings.Contains(scannerStdout.Text(), "__END_OF_EXECUTION__") {
 			break
 		}
     }
@@ -79,18 +79,18 @@ func NewPythonSession() (*PythonSession, error) {
         return nil, err
     }
 
-    // Step 2: Handle stderr - Write marker and consume output until __PROMPT__
-    _, err = fmt.Fprintf(ps.stdin, "import sys; res = sys.stderr.write('__PROMPT__\\n'); sys.stderr.flush()\n")
+    // Step 2: Handle stderr - Write marker and consume output until __END_OF_EXECUTION__
+    _, err = fmt.Fprintf(ps.stdin, "import sys; res = sys.stderr.write('__END_OF_EXECUTION__\\n'); sys.stderr.flush()\n")
     if err != nil {
         return nil, err
     }
 
     scannerStderr := bufio.NewScanner(ps.stderr)
     for scannerStderr.Scan() {
-        if strings.Contains(scannerStderr.Text(), "__PROMPT__") {
+        if strings.Contains(scannerStderr.Text(), "__END_OF_EXECUTION__") {
 			break
 		}
-        // if scannerStderr.Text() == "__PROMPT__" {
+        // if scannerStderr.Text() == "__END_OF_EXECUTION__" {
         //     break
         // }
     }
@@ -114,13 +114,13 @@ func (ps *PythonSession) Execute(code string) (string, string, error) {
     }
 
     // Write the stdout marker command
-    _, err = fmt.Fprintf(ps.stdin, "import sys; res = sys.stdout.write('__PROMPT__\\n'); sys.stdout.flush()\n")
+    _, err = fmt.Fprintf(ps.stdin, "import sys; res = sys.stdout.write('__END_OF_EXECUTION__\\n'); sys.stdout.flush()\n")
     if err != nil {
         return "", "", err
     }
 
     // Write the stderr marker command
-    _, err = fmt.Fprintf(ps.stdin, "res = sys.stderr.write('__PROMPT__\\n'); sys.stderr.flush()\n")
+    _, err = fmt.Fprintf(ps.stdin, "res = sys.stderr.write('__END_OF_EXECUTION__\\n'); sys.stderr.flush()\n")
     if err != nil {
         return "", "", err
     }
@@ -139,7 +139,7 @@ func (ps *PythonSession) Execute(code string) (string, string, error) {
         scannerStdout := bufio.NewScanner(ps.stdout)
         for scannerStdout.Scan() {
             line := scannerStdout.Text()
-            if strings.Contains(line, "__PROMPT__") {
+            if strings.Contains(line, "__END_OF_EXECUTION__") {
                 close(stdoutDone)
                 return
             }
@@ -152,7 +152,7 @@ func (ps *PythonSession) Execute(code string) (string, string, error) {
         scannerStderr := bufio.NewScanner(ps.stderr)
         for scannerStderr.Scan() {
             line := scannerStderr.Text()
-            if strings.Contains(line, "__PROMPT__") {
+            if strings.Contains(line, "__END_OF_EXECUTION__") {
                 close(stderrDone)
                 return
             }
