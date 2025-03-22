@@ -1,33 +1,174 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
+    "bufio"
+    "encoding/json"
+    "fmt"
+    "io"
+    "net/http"
+    "os/exec"
+    "sync"
 	"log"
-	"net/http"
-	"os/exec"
-	"time"
+	"strings"
+    "github.com/google/uuid"
 )
 
+var sessions = make(map[string]*PythonSession)
+
+type PythonSession struct {
+    cmd    *exec.Cmd
+    stdin  io.WriteCloser
+    stdout io.ReadCloser
+    stderr io.ReadCloser
+    mutex  *sync.Mutex
+}
+
 type Request struct {
-	Code    *string `json:"code"`
+    ID     *string `json:"id"`
+    Code   *string `json:"code"`
 }
 
 type Response struct {
-	Stdout  string `json:"stdout"`
-	Stderr  string `json:"stderr"`
+    ID     string `json:"id"`
+    Stdout string `json:"stdout"`
+    Stderr string `json:"stderr"`
+}
+
+func NewPythonSession() (*PythonSession, error) {
+    cmd := exec.Command("python3", "-i")
+    stdin, err := cmd.StdinPipe()
+    if err != nil {
+        return nil, err
+    }
+    stdout, err := cmd.StdoutPipe()
+    if err != nil {
+        return nil, err
+    }
+
+    stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+
+    if err := cmd.Start(); err != nil {
+        return nil, err
+    }
+
+    ps := &PythonSession{
+        cmd:    cmd,
+        stdin:  stdin,
+        stdout: stdout,
+        stderr: stderr,
+        mutex:  &sync.Mutex{},
+    }
+
+    // Consume initial startup messages
+    // Write the marker command
+    _, err = fmt.Fprintf(ps.stdin, "import sys; sys.stdout.write('__PROMPT__\\n'); sys.stdout.flush()\n")
+    if err != nil {
+        return nil, err
+    }
+
+    _, err = fmt.Fprintf(ps.stdin, "import sys; sys.stderr.write('__PROMPT__\\n'); sys.stderr.flush()\n")
+    if err != nil {
+        return nil, err
+    }
+
+
+    scannerStdout := bufio.NewScanner(ps.stdout)
+    // scannerStderr := bufio.NewScanner(ps.stderr)
+    for scannerStdout.Scan() {
+        if scannerStdout.Text() == "__PROMPT__" {
+            break
+        }
+    }
+
+    // for scannerStderr.Scan() {
+    //     if scannerStderr.Text() == "__PROMPT__" {
+    //         break
+    //     }
+    // }
+
+
+    if err := scannerStdout.Err(); err != nil {
+        return nil, err
+    }
+
+    // if err := scannerStderr.Err(); err != nil {
+    //     return nil, err
+    // }
+
+
+    return ps, nil
+}
+
+func (ps *PythonSession) Execute(code string) (string, string, error) {
+    ps.mutex.Lock()
+    defer ps.mutex.Unlock()
+
+
+    // Write the code followed by a newline
+    _, err := fmt.Fprintf(ps.stdin, "%s\n", code)
+    if err != nil {
+        return "", "", err
+    }
+
+    // Write the marker command
+    _, err = fmt.Fprintf(ps.stdin, "import sys; sys.stdout.write('__PROMPT__\\n'); sys.stdout.flush()\n")
+    if err != nil {
+        return "", "", err
+    }
+    // _, err = fmt.Fprintf(ps.stdin, "import sys; sys.stderr.write('__PROMPT__\\n'); sys.stderr.flush()\n")
+    // if err != nil {
+    //     return "", "", err
+    // }
+
+    log.Printf("Executing code: %s", code)
+
+    // Read output until the marker
+    scannerStdout := bufio.NewScanner(ps.stdout)
+    // scannerStderr := bufio.NewScanner(ps.stderr)
+
+    var stdoutLines []string 
+    // var stderrLines []string
+    
+    for scannerStdout.Scan() {
+        line := scannerStdout.Text()
+        if line == "__PROMPT__" {
+            break
+        }
+        stdoutLines = append(stdoutLines, line)
+    }
+    log.Printf("stdoutLines: %s", stdoutLines)
+
+    // for scannerStderr.Scan() {
+    //     line := scannerStderr.Text()
+    //     if line == "__PROMPT__" {
+    //         break
+    //     }
+    //     stderrLines = append(stderrLines, line)
+    // }
+
+    if err := scannerStdout.Err(); err != nil {
+        return "", "", err
+    }
+
+    // if err := scannerStderr.Err(); err != nil {
+    //     return "", "", err
+    // }
+
+    // Combine output lines
+    return strings.Join(stdoutLines, "\n"), "", nil
 }
 
 func execHandler(w http.ResponseWriter, r *http.Request) {
-	// Only accept POST requests
+    // Only accept POST requests
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error": "Method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Set response content type
+    // Set response content type
 	w.Header().Set("Content-Type", "application/json")
 
 	// Decode the request body
@@ -42,72 +183,42 @@ func execHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set default timeout if not specified
-	timeout := 2 // Default 2 seconds
+    var session *PythonSession
+    var ID string
 
-	// Create a context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
-	defer cancel()
+    if req.ID == nil {
+        err := error(nil)
+        session, err = NewPythonSession()
+        ID = uuid.New().String()
+        sessions[ID] = session
+        
+        if err != nil {
+            http.Error(w, `{"error": "Failed to start Python session"}`, http.StatusInternalServerError)
+            return
+        }
+    } else {
+        ID = *req.ID
+        session = sessions[ID]
+        if session == nil {
+            http.Error(w, `{"error": "Invalid session ID"}`, http.StatusBadRequest)
+            return
+        }
+    }
 
-	// Create Python subprocess with the context
-	cmd := exec.CommandContext(ctx, "python3", "-c", *req.Code)
-	
-	// Get stdout pipe
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		http.Error(w, `{"error": "Failed to create stdout pipe"}`, http.StatusInternalServerError)
-		return
-	}
-	
-	// Get stderr pipe
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		http.Error(w, `{"error": "Failed to create stderr pipe"}`, http.StatusInternalServerError)
-		return
-	}
-	
-	// Start the command
-	if err := cmd.Start(); err != nil {
-		http.Error(w, `{"error": "Failed to start Python process"}`, http.StatusInternalServerError)
-		return
-	}
-	
-	// Read stdout
-	stdoutBytes, err := io.ReadAll(stdout)
-	if err != nil {
-		http.Error(w, `{"error": "Failed to read stdout"}`, http.StatusInternalServerError)
-		return
-	}
-	
-	// Read stderr
-	stderrBytes, err := io.ReadAll(stderr)
-	if err != nil {
-		http.Error(w, `{"error": "Failed to read stderr"}`, http.StatusInternalServerError)
-		return
-	}
-	
-	// Wait for the command to finish
-	err = cmd.Wait()
-	
-	// Create response
-	response := Response{
-		Stdout:  string(stdoutBytes),
-		Stderr:  string(stderrBytes),
-	}
-	
-	// Check if the execution timed out
-	if ctx.Err() == context.DeadlineExceeded {
-		// response.Timeout = true
-		// response.Stderr += "\nExecution timed out after " + fmt.Sprintf("%d", timeout) + " seconds"
-		http.Error(w, `{"error": "Execution timed out"}`, http.StatusInternalServerError)
-		return
-	} else if err != nil {
-		// We don't return an HTTP error here because we want to return the stderr output
-		// even if the Python code had an error
-		log.Printf("Python execution error: %v", err)
-	}
-	
-	// Write the JSON response
+    stdout, stderr, err := session.Execute(*req.Code)
+
+    if err != nil {
+        http.Error(w, `{"error": "Execution error"}`, http.StatusInternalServerError)
+        return
+    }
+
+    response := Response{
+        ID:     ID,
+        Stdout: stdout,
+        Stderr: stderr,
+    }
+
+    // Write the JSON response
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -117,7 +228,7 @@ func execHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	http.HandleFunc("/execute", execHandler)
 
-	// Define the port where the server will listen
+    // Define the port where the server will listen
 	port := ":8080"
 	fmt.Println("Server is listening on port", port)
 

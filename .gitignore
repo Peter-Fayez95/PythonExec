@@ -1,2 +1,3 @@
 # main_*.go
-main_*
+mai*
+!main.go
