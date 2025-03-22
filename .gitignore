@@ -1,0 +1,3 @@
+# main_*.go
+mai*
+!main.go
