@@ -263,7 +263,7 @@ func main() {
 	fmt.Println("Server is listening on port", port)
 
 	// Start the server and listen for requests
-	if err := http.ListenAndServe(port, nil); err != nil {
+	if err := http.ListenAndServe("0.0.0.0" + port, nil); err != nil {
 		log.Fatal("Server failed to start: ", err)
 	}
 }
