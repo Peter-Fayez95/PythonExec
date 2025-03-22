@@ -11,7 +11,7 @@ import (
 	"log"
 	"strings"
     "github.com/google/uuid"
-    // "time"
+    "time"
 )
 
 var sessions = make(map[string]*PythonSession)
@@ -125,38 +125,64 @@ func (ps *PythonSession) Execute(code string) (string, string, error) {
         return "", "", err
     }
 
-    // Read stdout until the marker
-    scannerStdout := bufio.NewScanner(ps.stdout)
-    scannerStderr := bufio.NewScanner(ps.stderr)
-
     var stdoutLines []string
     var stderrLines []string
-
-    for scannerStdout.Scan() {
-        line := scannerStdout.Text()
-        if strings.Contains(line, "__PROMPT__") {
-			break
-		}
-        // log.Printf("stdout: %s", line)
-        stdoutLines = append(stdoutLines, line)
+    
+    // Channels to collect output
+    stdoutCh := make(chan string, 100)
+    stderrCh := make(chan string, 100)
+    stdoutDone := make(chan struct{})
+    stderrDone := make(chan struct{})
+    
+    // Scan stdout in a goroutine
+    go func() {
+        scannerStdout := bufio.NewScanner(ps.stdout)
+        for scannerStdout.Scan() {
+            line := scannerStdout.Text()
+            if strings.Contains(line, "__PROMPT__") {
+                close(stdoutDone)
+                return
+            }
+            stdoutCh <- line
+        }
+    }()
+    
+    // Scan stderr in a goroutine
+    go func() {
+        scannerStderr := bufio.NewScanner(ps.stderr)
+        for scannerStderr.Scan() {
+            line := scannerStderr.Text()
+            if strings.Contains(line, "__PROMPT__") {
+                close(stderrDone)
+                return
+            }
+            stderrCh <- line
+        }
+    }()
+    
+    // Set a deadline for the execution
+    timeout := time.After(2 * time.Second)
+    
+    // Wait for completion or timeout
+    stdoutComplete := false
+    stderrComplete := false
+    
+    for !stdoutComplete || !stderrComplete {
+        select {
+        case line := <-stdoutCh:
+            stdoutLines = append(stdoutLines, line)
+        case line := <-stderrCh:
+            stderrLines = append(stderrLines, line)
+        case <-stdoutDone:
+            stdoutComplete = true
+        case <-stderrDone:
+            stderrComplete = true
+        case <-timeout:
+            // If timeout, consider both streams complete
+            return "", "", fmt.Errorf("execution timeout")
+        }
     }
 
-    for scannerStderr.Scan() {
-        line := scannerStderr.Text()
-        if strings.Contains(line, "__PROMPT__") {
-			break
-		}
-        stderrLines = append(stderrLines, line)
-    }
-
-    if err := scannerStdout.Err(); err != nil {
-        return "", "", err
-    }
-    if err := scannerStderr.Err(); err != nil {
-        return "", "", err
-    }
-
-    // Combine output lines
     return strings.Join(stdoutLines, "\n"), strings.Join(stderrLines, "\n"), nil
 }
 
@@ -207,6 +233,11 @@ func execHandler(w http.ResponseWriter, r *http.Request) {
     stdout, stderr, err := session.Execute(*req.Code)
 
     if err != nil {
+        if err.Error() == "execution timeout" {
+            sessions[ID] = nil
+            http.Error(w, `{"error": "Execution timeout and session terminated"}`, http.StatusRequestTimeout)
+            return
+        }
         http.Error(w, `{"error": "Execution error"}`, http.StatusInternalServerError)
         return
     }
